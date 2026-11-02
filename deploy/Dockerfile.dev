@@ -1,0 +1,7 @@
+ARG HYPERF_IMAGE=hyperf/hyperf:8.4-alpine-v3.22-swoole-v6.2.2@sha256:72a2ba687ad95f8d5df2a8d17999b530774bc7c5b6098a86822251c062a00f7d
+FROM ${HYPERF_IMAGE}
+
+# The base image only allows root to execute Composer; the watcher runs as the WSL user.
+RUN chmod 0755 /usr/local/bin/composer
+
+WORKDIR /opt/www

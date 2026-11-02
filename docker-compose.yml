@@ -1,56 +1,34 @@
-name: mineadmin
-
-volumes:
-  mine_redis_data:
-  mine_mysql_data:
+name: mineadmin-dev
 
 services:
-  redis:
-    image: redis:7.2-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - mine_redis_data:/data
-    command: redis-server --appendonly yes
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-    environment:
-      - TZ=Asia/Shanghai
-
-  mysql:
-    image: mysql:5.7
-    volumes:
-      - mine_mysql_data:/var/lib/mysql
-    ports:
-      - "3306:3306"
-    command: --default-authentication-plugin=mysql_native_password
-    environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: mineadmin
-      MYSQL_CHARACTER_SET_SERVER: utf8mb4
-      MYSQL_COLLATION_SERVER: utf8mb4_unicode_ci
-      TZ: Asia/Shanghai
-
   hyperf:
-    image: hyperf/hyperf:8.1-alpine-v3.18-swoole
+    image: mineadmin-backend:dev
+    build:
+      context: ./deploy
+      dockerfile: Dockerfile.dev
+    pull_policy: build
+    init: true
+    user: "${LOCAL_UID:?Set LOCAL_UID in .env from id -u}:${LOCAL_GID:?Set LOCAL_GID in .env from id -g}"
+    working_dir: /opt/www
     volumes:
-      - ./:/www
-    working_dir: /www
+      - ./:/opt/www
     ports:
-      - "9501:9501"
+      - "127.0.0.1:${LOCAL_HTTP_PORT:-9501}:9501"
     environment:
-      - TZ=Asia/Shanghai
-      - APP_NAME=MineAdmin
+      TZ: Asia/Shanghai
+      APP_ENV: dev
+      SCAN_CACHEABLE: "false"
+      HTTP_HOST: 0.0.0.0
+      HTTP_PORT: "9501"
+      SWOOLE_WORKER_NUM: "1"
+      COMPOSER_HOME: /tmp/composer
+      # Docker Desktop reaches Windows FlyEnv via this hostname.
+      # The application reads credentials and ports from the mounted .env.
+      DB_HOST: "${LOCAL_DB_HOST:-host.docker.internal}"
+      REDIS_HOST: "${LOCAL_REDIS_HOST:-host.docker.internal}"
     command:
-      - sh
-      - -c
-      - |
-        ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
-        tail -F /dev/null
+      - php
+      - -d
+      - swoole.use_shortname=Off
+      - bin/hyperf.php
+      - server:watch
