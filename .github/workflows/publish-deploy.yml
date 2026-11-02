@@ -1,0 +1,185 @@
+name: Publish and deploy backend
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy to the Ubuntu server after publishing both images
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+
+# Keep an active deployment running while newer commits wait.
+concurrency:
+  group: mineadmin-production
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+      ACR_NAMESPACE: ${{ vars.ACR_NAMESPACE }}
+    outputs:
+      acr-image: ${{ steps.images.outputs.acr-image }}
+      ghcr-image: ${{ steps.images.outputs.ghcr-image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Validate registry settings
+        id: images
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ ! "$ACR_REGISTRY" =~ ^[a-z0-9][a-z0-9.-]*[a-z0-9]$ ]]; then
+            printf '%s\n' 'Set ACR_REGISTRY to the public registry hostname from the ACR console, without https://.' >&2
+            exit 1
+          fi
+          if [[ ! "$ACR_NAMESPACE" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+            printf '%s\n' 'Set ACR_NAMESPACE to your ACR namespace.' >&2
+            exit 1
+          fi
+          printf 'acr-image=%s/%s/mineadmin-backend\n' "$ACR_REGISTRY" "$ACR_NAMESPACE" >> "$GITHUB_OUTPUT"
+          printf 'ghcr-image=ghcr.io/%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to ACR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build once and push to both registries
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.images.outputs.acr-image }}:sha-${{ github.sha }}
+            ${{ steps.images.outputs.acr-image }}:latest
+            ${{ steps.images.outputs.ghcr-image }}:sha-${{ github.sha }}
+            ${{ steps.images.outputs.ghcr-image }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=mineadmin-backend-amd64
+          cache-to: type=gha,mode=max,scope=mineadmin-backend-amd64
+
+      - name: Record published images
+        env:
+          ACR_IMAGE: ${{ steps.images.outputs.acr-image }}
+          GHCR_IMAGE: ${{ steps.images.outputs.ghcr-image }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          {
+            printf 'Published the same build to both registries:\n\n'
+            printf -- '- ACR: `%s@%s`\n' "$ACR_IMAGE" "$IMAGE_DIGEST"
+            printf -- '- GHCR: `%s@%s`\n' "$GHCR_IMAGE" "$IMAGE_DIGEST"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: publish
+    if: github.ref == 'refs/heads/master' && (github.event_name == 'push' || inputs.deploy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER || 'deploy' }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/mineadmin' }}
+      APP_IMAGE: ${{ needs.publish.outputs.acr-image }}@${{ needs.publish.outputs.digest }}
+    steps:
+      - name: Checkout deployment files
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Prepare verified SSH access
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SSH_DIR="$RUNNER_TEMP/mineadmin-ssh"
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || { printf '%s\n' 'DEPLOY_HOST must be a hostname or IPv4 address.' >&2; exit 1; }
+          [[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || { printf '%s\n' 'Invalid DEPLOY_USER.' >&2; exit 1; }
+          [[ "$DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]] && (( 10#$DEPLOY_PORT >= 1 && 10#$DEPLOY_PORT <= 65535 )) || { printf '%s\n' 'Invalid DEPLOY_PORT.' >&2; exit 1; }
+          [[ "$DEPLOY_PATH" =~ ^/[a-zA-Z0-9._/-]+$ ]] && [[ "$DEPLOY_PATH" != / ]] && [[ "$DEPLOY_PATH/" != *'/../'* && "$DEPLOY_PATH/" != *'/./'* ]] || { printf '%s\n' 'DEPLOY_PATH must be an absolute path without spaces or dot segments.' >&2; exit 1; }
+          [[ -n "$DEPLOY_SSH_KEY" && -n "$DEPLOY_KNOWN_HOSTS" ]] || { printf '%s\n' 'Set DEPLOY_SSH_KEY and the verified DEPLOY_KNOWN_HOSTS.' >&2; exit 1; }
+
+          umask 077
+          install -d -m 700 "$SSH_DIR"
+          printf '%s\n' "${DEPLOY_SSH_KEY//$'\r'/}" > "$SSH_DIR/deploy_key"
+          printf '%s\n' "${DEPLOY_KNOWN_HOSTS//$'\r'/}" > "$SSH_DIR/known_hosts"
+          ssh-keygen -y -P '' -f "$SSH_DIR/deploy_key" > /dev/null
+          lookup_host="$DEPLOY_HOST"
+          if (( 10#$DEPLOY_PORT != 22 )); then
+            lookup_host="[$DEPLOY_HOST]:$DEPLOY_PORT"
+          fi
+          ssh-keygen -F "$lookup_host" -f "$SSH_DIR/known_hosts" > /dev/null || { printf '%s\n' 'The verified known_hosts file has no entry for this host and SSH port.' >&2; exit 1; }
+
+      - name: Upload release and deploy its ACR digest
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SSH_DIR="$RUNNER_TEMP/mineadmin-ssh"
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+          release_id="$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          release_dir="${DEPLOY_PATH%/}/releases/$release_id"
+          common_options=(
+            -i "$SSH_DIR/deploy_key"
+            -o "UserKnownHostsFile=$SSH_DIR/known_hosts"
+            -o StrictHostKeyChecking=yes
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o ConnectTimeout=15
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=4
+          )
+
+          printf -v prepare_command 'test -r %q/runtime.env && test -r %q/compose.env && umask 027 && mkdir -p %q' "$DEPLOY_PATH" "$DEPLOY_PATH" "$release_dir"
+          ssh "${common_options[@]}" -p "$DEPLOY_PORT" "$target" "$prepare_command"
+          scp "${common_options[@]}" -P "$DEPLOY_PORT" deploy/compose.yml deploy/deploy.sh "$target:$release_dir/"
+          printf -v deploy_command 'bash %q %q' "$release_dir/deploy.sh" "$APP_IMAGE"
+          ssh "${common_options[@]}" -p "$DEPLOY_PORT" "$target" "$deploy_command"
+          printf 'Deployed `%s` to the Ubuntu server.\n' "$APP_IMAGE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary SSH files
+        if: always()
+        shell: bash
+        run: |
+          SSH_DIR="$RUNNER_TEMP/mineadmin-ssh"
+          rm -f -- "$SSH_DIR/deploy_key" "$SSH_DIR/known_hosts"
+          if [[ -d "$SSH_DIR" ]]; then
+            rmdir -- "$SSH_DIR"
+          fi
