@@ -88,6 +88,8 @@ composer create-project mineadmin/mineadmin --keep-vcs
 
 更完整的安装、配置、部署和开发说明，请查看[官方文档](https://doc.mineadmin.com)。
 
+本仓库的开发与发布流程见 [Windows FlyEnv 开发 → ACR/GHCR → 阿里云轻量 Ubuntu 部署](docs/deployment-aliyun.md)：本地 PHP 8.4 容器连接 FlyEnv 的 MySQL、Redis；生产 Hyperf 镜像通过服务器环境变量连接阿里云独立 MySQL、Redis 服务，使用 GitHub Actions 发布。
+
 ## 体验地址
 
 [在线演示](https://demo.mineadmin.com)
@@ -99,7 +101,7 @@ composer create-project mineadmin/mineadmin --keep-vcs
 
 ## 环境要求
 
-- PHP >= 8.1
+- PHP >= 8.2；当前 `composer.lock` 的依赖要求 PHP >= 8.4.1，生产镜像使用 PHP 8.4
 - Swoole >= 5.0，并关闭 `Short Name`
 - Redis >= 4.0
 - MySQL >= 5.7 / PostgreSQL >= 10 / SQL Server
