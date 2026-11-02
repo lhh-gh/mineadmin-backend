@@ -1,0 +1,27 @@
+services:
+  app:
+    image: ${APP_IMAGE:?APP_IMAGE must be set in release.env}
+    restart: unless-stopped
+    init: true
+    # Listen on 0.0.0.0 inside the container; host Nginx uses the loopback port.
+    # DB_HOST/REDIS_HOST in runtime.env point to independent Aliyun services.
+    ports:
+      - "127.0.0.1:9501:9501"
+    env_file:
+      - path: ../../runtime.env
+        format: raw
+    volumes:
+      - ../../shared/uploads:/opt/www/storage/uploads
+      - ../../shared/logs:/opt/www/runtime/logs
+    cpus: ${APP_CPUS:-1.0}
+    mem_limit: ${APP_MEMORY_LIMIT:-768m}
+    stop_grace_period: 30s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

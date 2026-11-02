@@ -23,3 +23,10 @@ public
 !composer.lock
 storage/swagger/http.json
 storage/uploads
+
+# Local deployment configuration and persistent data.
+/deploy/*.env
+/deploy/releases/
+/deploy/shared/
+/deploy/current
+/deploy/previous
