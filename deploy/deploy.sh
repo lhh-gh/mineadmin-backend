@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Each release keeps its own Compose file and immutable image digest.
+# Each release keeps its frontend dist, Compose file and immutable image digest.
 # Shared runtime.env and compose.env stay two directories above this script.
 usage() {
   printf '%s\n' \
@@ -37,7 +37,7 @@ else
   valid_image "$1" || die 'Provide a complete registry image reference pinned to a sha256 digest.'
 fi
 
-for required_command in docker flock readlink; do
+for required_command in docker flock readlink tar sha256sum; do
   command -v "$required_command" > /dev/null || die "Missing command: $required_command"
 done
 SCRIPT_FILE="$(readlink -f -- "${BASH_SOURCE[0]}")"
@@ -61,6 +61,39 @@ validate_release() {
   local directory="$1"
   [[ -d "$directory" && "$(dirname -- "$directory")" == "$ROOT_DIR/releases" ]] || die 'The release path must be a direct subdirectory of <deploy-root>/releases/.'
   [[ -f "$directory/compose.yml" ]] || die "Missing Compose file in release: $directory"
+}
+
+validate_frontend() {
+  local directory="$1"
+  [[ -s "$directory/frontend/index.html" ]] || die "Missing frontend dist in release: $directory"
+}
+
+prepare_frontend() {
+  local archive="$RELEASE_DIR/frontend-dist.tar.gz"
+  local checksum archive_entries entry
+  [[ -r "$archive" ]] || die 'Upload frontend-dist.tar.gz to the release directory before deploying.'
+  checksum="$(sha256sum -- "$archive")"
+  checksum="${checksum%% *}"
+  if [[ -r "$RELEASE_DIR/frontend.sha256" ]]; then
+    [[ "$(cat -- "$RELEASE_DIR/frontend.sha256")" == "$checksum" ]] || die 'This release already records a different frontend. Create a new release directory.'
+    validate_frontend "$RELEASE_DIR"
+    return
+  fi
+  [[ ! -e "$RELEASE_DIR/frontend" && ! -L "$RELEASE_DIR/frontend" ]] || die 'A partial frontend directory exists. Create a new release directory.'
+  archive_entries="$(tar -tzf "$archive")"
+  while IFS= read -r entry; do
+    [[ "$entry" != /* && "/$entry/" != *'/../'* ]] || die 'The frontend archive must contain only relative paths without parent segments.'
+  done <<< "$archive_entries"
+  if ! tar -tvzf "$archive" | awk 'substr($0, 1, 1) != "-" && substr($0, 1, 1) != "d" { exit 1 }'; then
+    die 'The frontend archive must contain only regular files and directories.'
+  fi
+  mkdir -m 0755 -- "$RELEASE_DIR/frontend"
+  tar -xzf "$archive" -C "$RELEASE_DIR/frontend" --no-same-owner --no-same-permissions
+  validate_frontend "$RELEASE_DIR"
+  chmod -R u=rwX,go=rX -- "$RELEASE_DIR/frontend"
+  # Nginx must traverse the release directory; runtime.env stays outside it.
+  chmod 0755 -- "$RELEASE_DIR"
+  (umask 077; printf '%s\n' "$checksum" > "$RELEASE_DIR/frontend.sha256")
 }
 
 read_release_image() {
@@ -186,6 +219,12 @@ trap 'on_failure $?' ERR
 trap 'on_failure 130' INT
 trap 'on_failure 143' TERM
 trap 'on_failure 129' HUP
+
+if [[ "$MODE" == deploy ]]; then
+  prepare_frontend
+else
+  validate_frontend "$TARGET_RELEASE"
+fi
 
 log "Pulling $(read_release_image "$TARGET_RELEASE")."
 compose_for "$TARGET_RELEASE" pull app

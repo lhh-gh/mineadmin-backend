@@ -1,4 +1,4 @@
-name: Publish and deploy backend
+name: Publish backend and deploy frontend dist
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       deploy:
-        description: Deploy to the Ubuntu server after publishing both images
+        description: Deploy the frontend dist and backend image to the Ubuntu server
         type: boolean
         required: true
         default: true
@@ -105,8 +105,71 @@ jobs:
             printf -- '- GHCR: `%s@%s`\n' "$GHCR_IMAGE" "$IMAGE_DIGEST"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  build-frontend:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VITE_APP_API_BASEURL: ${{ vars.FRONTEND_API_BASEURL || '/prod' }}
+      VITE_OPEN_PROXY: 'false'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Validate frontend build settings
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ "$VITE_APP_API_BASEURL" != /prod && ! "$VITE_APP_API_BASEURL" =~ ^https?://[^[:space:]]+$ ]]; then
+            printf '%s\n' 'FRONTEND_API_BASEURL must be /prod or a browser-accessible HTTP(S) backend URL.' >&2
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: '22'
+
+      - name: Install frontend dependencies
+        working-directory: web
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm install --global pnpm@11.9.0
+          if [[ ! -f pnpm-workspace.yaml ]]; then
+            printf '%s\n' 'allowBuilds:' "  '@parcel/watcher': true" \
+              '  core-js: false' '  esbuild: true' '  vue-demi: true' > pnpm-workspace.yaml
+          fi
+          if [[ -f pnpm-lock.yaml ]]; then
+            pnpm install --frozen-lockfile
+          else
+            pnpm install --no-frozen-lockfile
+          fi
+
+      - name: Build frontend dist
+        working-directory: web
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          pnpm build --mode production
+          test -s dist/index.html
+          tar -czf "$RUNNER_TEMP/frontend-dist.tar.gz" -C dist .
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mineadmin-frontend-dist-${{ github.sha }}
+          path: ${{ runner.temp }}/frontend-dist.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
   deploy:
-    needs: publish
+    needs: [publish, build-frontend]
     if: github.ref == 'refs/heads/master' && (github.event_name == 'push' || inputs.deploy)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -122,6 +185,12 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mineadmin-frontend-dist-${{ github.sha }}
+          path: ${{ runner.temp }}/mineadmin-frontend
 
       - name: Prepare verified SSH access
         env:
@@ -148,7 +217,7 @@ jobs:
           fi
           ssh-keygen -F "$lookup_host" -f "$SSH_DIR/known_hosts" > /dev/null || { printf '%s\n' 'The verified known_hosts file has no entry for this host and SSH port.' >&2; exit 1; }
 
-      - name: Upload release and deploy its ACR digest
+      - name: Upload frontend dist and deploy its backend ACR digest
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -169,10 +238,12 @@ jobs:
 
           printf -v prepare_command 'test -r %q/runtime.env && test -r %q/compose.env && umask 027 && mkdir -p %q' "$DEPLOY_PATH" "$DEPLOY_PATH" "$release_dir"
           ssh "${common_options[@]}" -p "$DEPLOY_PORT" "$target" "$prepare_command"
-          scp "${common_options[@]}" -P "$DEPLOY_PORT" deploy/compose.yml deploy/deploy.sh "$target:$release_dir/"
+          scp "${common_options[@]}" -P "$DEPLOY_PORT" \
+            deploy/compose.yml deploy/deploy.sh "$RUNNER_TEMP/mineadmin-frontend/frontend-dist.tar.gz" \
+            "$target:$release_dir/"
           printf -v deploy_command 'bash %q %q' "$release_dir/deploy.sh" "$APP_IMAGE"
           ssh "${common_options[@]}" -p "$DEPLOY_PORT" "$target" "$deploy_command"
-          printf 'Deployed `%s` to the Ubuntu server.\n' "$APP_IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Deployed frontend dist and backend `%s` as release `%s`.\n' "$APP_IMAGE" "$release_id" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove temporary SSH files
         if: always()

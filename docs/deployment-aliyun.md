@@ -1,16 +1,21 @@
-# Hyperf → ACR + GHCR → 阿里云轻量 Ubuntu → GitHub Actions
+# 前端 dist + Nginx，后端 Docker → 阿里云轻量 Ubuntu
 
-本流程发布当前仓库的 PHP 后端。同一次构建推送到阿里云 ACR 和 GHCR，Ubuntu 服务器从 ACR 拉取带摘要的镜像。本地 PHP 8.4 容器连接 Windows FlyEnv 的 MySQL、Redis；生产容器通过服务器环境变量连接阿里云独立 MySQL、Redis 服务。数据库连接在运行时配置，构建镜像时无需连接数据库。
+前端执行 `pnpm build` 生成 `dist`，通过 SSH 上传到 Ubuntu，由服务器安装的 Nginx 提供静态网站；前端运行时不需要 Node.js。PHP 后端的同一次镜像构建推送到阿里云 ACR 和 GHCR，服务器从 ACR 拉取带摘要的镜像。前后端产物来自同一提交，按同一个 release 部署和回滚。本地 PHP 8.4 容器连接 Windows FlyEnv 的 MySQL、Redis；生产容器通过服务器环境变量连接阿里云独立 MySQL、Redis 服务。数据库连接在运行时配置，构建时无需连接数据库。
 
 ```mermaid
 flowchart LR
-    Git[master 提交] --> Actions[GitHub Actions 构建一次]
+    Git[master 提交] --> Actions[构建 PHP 后端镜像]
+    Git --> Frontend[pnpm build 生成 dist]
+    Frontend --> Artifact[Actions 保存 dist 压缩包]
+    Artifact --> SSH[SSH 上传并发布同一版本]
     Actions --> ACR[阿里云 ACR]
     Actions --> GHCR[GitHub GHCR]
-    Actions --> SSH[SSH 发布指定镜像摘要]
+    Actions --> SSH
     ACR --> App[Ubuntu 上的 Hyperf 容器]
     SSH --> App
-    Nginx[Nginx HTTPS] --> App
+    SSH --> Static[Ubuntu 上的 dist 静态文件]
+    Nginx[Nginx HTTPS] --> Static
+    Nginx -->|/prod/ 代理| App
     App --> MySQL[阿里云独立 MySQL 服务]
     App --> Redis[阿里云独立 Redis 服务]
     Local[本地 PHP 8.4 开发容器] --> FlyEnv[Windows FlyEnv MySQL / Redis]
@@ -28,10 +33,11 @@ flowchart LR
 | [`deploy/compose.env.example`](../deploy/compose.env.example) | 应用 CPU、内存等 Compose 设置 |
 | [`deploy/runtime.env.example`](../deploy/runtime.env.example) | 生产环境变量与阿里云独立 MySQL、Redis 连接模板 |
 | [`deploy/local.env.example`](../deploy/local.env.example) | 本地应用容器连接 Windows FlyEnv 的模板 |
-| [`deploy/nginx.conf`](../deploy/nginx.conf) | HTTP 反向代理与上传文件静态访问 |
-| [`deploy/deploy.sh`](../deploy/deploy.sh) | 拉取、等待健康、记录版本及回滚 |
+| [`deploy/nginx-frontend.conf`](../deploy/nginx-frontend.conf) | 提供前端静态文件，代理 `/prod/` 到后端，并提供上传文件访问 |
+| [`deploy/nginx.conf`](../deploy/nginx.conf) | 可选的独立 API 域名反向代理 |
+| [`deploy/deploy.sh`](../deploy/deploy.sh) | 校验和解压 dist，拉取镜像，等待健康，记录版本并回滚前后端 |
 | [`app/Listener/RegisterSwaggerRoutesListener.php`](../app/Listener/RegisterSwaggerRoutesListener.php) | 关闭 Swagger 服务时仍注册业务路由及原有中间件 |
-| [`.github/workflows/publish-deploy.yml`](../.github/workflows/publish-deploy.yml) | 同时推送两个仓库并通过 SSH 发布 |
+| [`.github/workflows/publish-deploy.yml`](../.github/workflows/publish-deploy.yml) | 并行构建前端 dist 和后端镜像，通过 SSH 部署同一版本 |
 | [`.github/workflows/build.yml`](../.github/workflows/build.yml) | 在 push / pull request 中检查同一个生产镜像的构建 |
 
 本说明中的命令使用 Bash。本地 Windows 用户请在 WSL 中执行。服务器使用 Ubuntu 22.04/24.04、Docker Engine 和 **Compose 2.30 或更新版本**，需要 Bash、`flock`、SSH。执行 `uname -m` 确认服务器为 `x86_64`；当前 Actions 构建 `linux/amd64`。ARM 服务器应调整构建平台及构建 runner。
@@ -101,7 +107,7 @@ curl -f http://127.0.0.1:19501/
 在 [阿里云容器镜像服务控制台](https://cr.console.aliyun.com/) 创建或使用现有 ACR 实例：
 
 1. 选择适合服务器的地域，创建命名空间，例如 `your-namespace`。
-2. 创建私有镜像仓库 `mineadmin-backend`。镜像由 GitHub Actions 构建，ACR 的源码自动构建可以关闭。
+2. 创建私有镜像仓库 `mineadmin-backend`。前端以静态文件部署，无需创建前端镜像仓库。后端镜像由 GitHub Actions 构建，ACR 的源码自动构建可以关闭。
 3. 在访问凭证页面设置镜像仓库登录密码，记录控制台给出的登录用户名。
 4. 从仓库“推送/拉取”示例中复制 **公网 Registry 域名**。不同版本、地域和实例的域名不同，不要根据示例拼接实际地址。
 5. 使用企业版时配置公网访问入口及访问策略，确保 GitHub runner 和服务器均可连接。标准 GitHub hosted runner 的出口地址不是固定 IP；仅允许服务器 IP 的白名单会阻止 Actions 推送，可按实际网络方案使用固定出口 runner。
@@ -213,7 +219,7 @@ ssh -i ~/.ssh/mineadmin_actions -p "$SSH_PORT" \
 scp -i ~/.ssh/mineadmin_actions -P "$SSH_PORT" \
   -o UserKnownHostsFile="$HOME/.ssh/mineadmin_known_hosts" \
   -o StrictHostKeyChecking=yes \
-  deploy/runtime.env.example deploy/compose.env.example deploy/nginx.conf \
+  deploy/runtime.env.example deploy/compose.env.example deploy/nginx-frontend.conf \
   deploy@"$SERVER_IP":/opt/mineadmin/
 ```
 
@@ -235,7 +241,7 @@ openssl rand -hex 32
 ```dotenv
 APP_ENV=prod
 APP_DEBUG=false
-APP_URL=https://api.你的域名
+APP_URL=https://admin.你的域名
 HTTP_HOST=0.0.0.0
 HTTP_PORT=9501
 SWOOLE_WORKER_NUM=1
@@ -292,6 +298,7 @@ unset acr_password
 | --- | --- | --- |
 | Repository variable | `ACR_REGISTRY` | ACR 公网域名，不带协议或路径 |
 | Repository variable | `ACR_NAMESPACE` | ACR 命名空间 |
+| Repository variable | `FRONTEND_API_BASEURL` | 可选，默认 `/prod`，由前端域名的 Nginx 代理到后端；独立 API 域名可填写完整 HTTPS URL |
 | Repository secret | `ACR_USERNAME` | 有推送权限的 ACR 镜像登录用户名 |
 | Repository secret | `ACR_PASSWORD` | 该用户的 ACR 镜像登录密码 |
 | Repository / production variable | `DEPLOY_HOST` | 服务器公网 IP 或域名 |
@@ -305,6 +312,8 @@ unset acr_password
 
 生产 DB/Redis 密码、JWT 不放进 Docker build 参数或镜像，也不需要由 Actions 反复传送，它们保存在服务器 `runtime.env`。
 
+前端构建默认设置 `VITE_APP_API_BASEURL=/prod` 和 `VITE_OPEN_PROXY=false`。浏览器请求 `https://admin.你的域名/prod/admin/...`，Nginx 去掉 `/prod/` 前缀后转发给 `http://127.0.0.1:9501/admin/...`；这一方式无需跨域配置。`http://hyperf:9501` 是容器内部地址，浏览器无法使用。需要独立 API 域名时才设置 `FRONTEND_API_BASEURL=https://api.你的域名`，并配置后端 CORS 来源和独立 API 域名的 Nginx。修改构建变量后需重新构建 dist。
+
 ## 8. 第一次自动构建、双仓库推送与部署
 
 完成服务器环境、独立 MySQL/Redis 连接、ACR 登录和 GitHub 配置后，在本地复核改动并提交：
@@ -315,7 +324,7 @@ git status --short
 git add -- composer.lock .gitignore config/autoload/server.php config/autoload/commands.php \
   app/Listener/RegisterSwaggerRoutesListener.php deploy/Dockerfile deploy/Dockerfile.dockerignore \
   deploy/compose.yml deploy/compose.env.example deploy/runtime.env.example \
-  deploy/entrypoint.sh deploy/healthcheck.php deploy/nginx.conf
+  deploy/entrypoint.sh deploy/healthcheck.php deploy/nginx.conf deploy/nginx-frontend.conf
 git commit -m 'build(deploy): 增加 PHP 8.4 生产镜像及运行配置'
 
 git add -- docker-compose.yml deploy/Dockerfile.dev deploy/local.env.example
@@ -329,17 +338,21 @@ git commit -m 'docs(deploy): 说明 FlyEnv 开发与阿里云生产部署流程'
 git push origin master
 ```
 
-打开 [Actions 页面](https://github.com/lhh-gh/mineadmin-backend/actions)，查看 **Publish and deploy backend**：
+打开 [Actions 页面](https://github.com/lhh-gh/mineadmin-backend/actions)，查看 **Publish backend and deploy frontend dist**：
+
+`build-frontend` 使用 Node 22、pnpm 11.9.0，在 `web/` 安装依赖并构建生产 dist，将 `frontend-dist.tar.gz` 保存为 `mineadmin-frontend-dist-完整提交SHA` artifact，保留 14 天。可在该次 Actions 运行页面下载压缩包。服务器只需 Nginx 提供这些静态文件。
+
+构建与部署顺序如下：
 
 1. 检查 ACR 设置，并登录 GHCR、ACR。
 2. 根据 `deploy/Dockerfile` 构建一次，将同一构建推到两个仓库，各自生成 `sha-完整提交SHA` 和 `latest` 标签。
-3. 两个推送成功后，用返回的 `sha256` 摘要部署 ACR 镜像。
-4. 通过 SSH 上传该版本的 Compose 和脚本；服务器拉取镜像、替换应用，并等待健康检查。
-5. 健康后记录 `current` 和 `previous`。升级失败时尝试恢复上一个健康版本，Actions 仍显示失败以便排查。
+3. 后端双仓库推送与前端 dist 构建均成功后，下载 dist artifact，用后端返回的 `sha256` 摘要部署 ACR 镜像。
+4. 通过 SSH 上传该版本的 Compose、脚本和 dist 压缩包；服务器先校验和解压 dist，再拉取镜像、替换应用，并等待健康检查。
+5. 健康后切换 `current` 和 `previous`，Nginx 自动读取新版本的 `current/frontend`，日常发布无需重新加载 Nginx。升级失败时尝试恢复上一个健康版本，Actions 仍显示失败以便排查。
 
-也可在 workflow 的 **Run workflow** 中选择 `master` 手动执行；取消 `deploy` 选项只构建、双推送，不连接服务器。此方式适合服务器准备好之前先验证镜像发布。
+也可在 workflow 的 **Run workflow** 中选择 `master` 手动执行；取消 `deploy` 选项只发布后端镜像并保存前端 dist，不连接服务器。此方式适合服务器准备好之前先验证构建产物。
 
-标签方便浏览，实际部署固定为 `ACR_IMAGE@sha256:...`。两个仓库不提供跨仓库事务；任意一个推送失败都会阻止本轮服务器部署。并发提交会串行发布，GitHub 可能以最新排队运行替代中间排队运行。
+标签方便浏览，后端部署固定为 `ACR_IMAGE@sha256:...`。后端的 ACR、GHCR 两次推送不提供跨仓库事务；其中任意一次失败或前端构建失败都会阻止本轮服务器部署。并发提交会串行发布，GitHub 可能以最新排队运行替代中间排队运行。
 
 服务器目录结构：
 
@@ -353,6 +366,11 @@ git push origin master
     compose.yml
     deploy.sh
     release.env                  # 只有 APP_IMAGE=...@sha256:...
+    frontend-dist.tar.gz         # 本次构建的前端静态文件压缩包
+    frontend.sha256              # 压缩包校验值，防止覆盖同一版本
+    frontend/                    # Nginx 提供的 dist 内容
+      index.html
+      static/
   current -> releases/<健康版本>
   previous -> releases/<上个健康版本>
 ```
@@ -387,34 +405,57 @@ mineadmin_compose run --rm --no-deps app php bin/hyperf.php db:seed --path=datab
 
 现有用户模型的初始管理员密码为 `123456`，初始化完成后立即修改。生产发布脚本不运行 `db:seed` 或 `mine:install`；后者还包含前端下载和插件安装流程，并要求项目 `.env` 文件存在。
 
-后续数据库结构更新先备份，并采用与旧、新应用版本都兼容的迁移。脚本自动回滚的是应用镜像及版本 Compose；数据库结构、共享文件和 `runtime.env` 的修改需要单独处理。
+后续数据库结构更新先备份，并采用与旧、新应用版本都兼容的迁移。脚本自动回滚的是前端 dist、应用镜像及版本 Compose；数据库结构、共享文件和 `runtime.env` 的修改需要单独处理。
 
 ## 10. Nginx、域名与 HTTPS
 
 把域名 A 记录指向服务器公网 IP。中国内地服务器使用域名提供网站服务时，按阿里云要求完成域名备案。
 
-将 [`deploy/nginx.conf`](../deploy/nginx.conf) 复制到服务器，修改 `server_name` 为实际域名，以管理员执行：
+将 [`deploy/nginx-frontend.conf`](../deploy/nginx-frontend.conf) 复制到服务器，修改 `server_name` 为前端实际域名，以管理员执行。若 `DEPLOY_PATH` 不是 `/opt/mineadmin`，同步修改该文件的 `root` 和 `alias` 路径：
 
 ```bash
-sudo cp /opt/mineadmin/nginx.conf /etc/nginx/sites-available/mineadmin
-sudo ln -s /etc/nginx/sites-available/mineadmin /etc/nginx/sites-enabled/mineadmin
+sudo cp /opt/mineadmin/nginx-frontend.conf /etc/nginx/sites-available/mineadmin-frontend
+sudo ln -sfn /etc/nginx/sites-available/mineadmin-frontend /etc/nginx/sites-enabled/mineadmin-frontend
 sudo nginx -t
 sudo systemctl reload nginx
 curl -f http://127.0.0.1:9501/
-curl -f -H 'Host: api.你的域名' http://127.0.0.1/
+curl -f -H 'Host: admin.你的域名' http://127.0.0.1/
+curl -f -H 'Host: admin.你的域名' http://127.0.0.1/prod/
 ```
 
 初次上线可先把 `APP_URL` 设为实际 HTTP 地址验证，再申请 HTTPS：
 
 ```bash
 sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d api.你的域名
+sudo certbot --nginx -d admin.你的域名
 sudo certbot renew --dry-run
 ```
 
 证书申请要求 DNS 已生效、80/443 可达。将服务器 `runtime.env` 中 `APP_URL` 改为最终 `https://...` 地址后执行 `mineadmin_compose up -d --force-recreate app`，让新的环境进入新容器。上传文件的公开 URL 使用 `APP_URL/uploads`，Nginx 映射服务器的共享上传目录。
 
-前端 `web/` 单独构建并托管，将其 API 地址指向此后端域名。跨域访问按项目 CORS 配置设置允许的来源。
+前端默认同域请求 `/prod`，Nginx 将其代理到宿主机环回端口；浏览器不会直接访问 Docker 容器地址。`index.html` 使用 `no-cache`，`/static/` 缺失资源还会尝试从 previous 版本读取，减少切换版本时已打开页面的资源加载失败。缺失的 `/static/` 资源返回 404；history 路由会回退到首页，当前默认 hash 路由也可使用此配置。
+
+手动构建前端时，在仓库根目录执行，使用满足 Vite 要求的 Node 22 和 pnpm 11.9.0：
+
+```bash
+cd web
+if [[ ! -f pnpm-workspace.yaml ]]; then
+  printf '%s\n' 'allowBuilds:' "  '@parcel/watcher': true" \
+    '  core-js: false' '  esbuild: true' '  vue-demi: true' > pnpm-workspace.yaml
+fi
+if [[ -f pnpm-lock.yaml ]]; then
+  pnpm install --frozen-lockfile
+else
+  pnpm install --no-frozen-lockfile
+fi
+VITE_APP_API_BASEURL=/prod VITE_OPEN_PROXY=false pnpm build --mode production
+tar -czf /tmp/frontend-dist.tar.gz -C dist .
+cd ..
+```
+
+CI 存在 `pnpm-lock.yaml` 时使用 `--frozen-lockfile`，否则按 `package.json` 安装；若缺少 `pnpm-workspace.yaml`，CI 会在 runner 内生成所需依赖构建许可配置。已有的本地锁文件和 workspace 配置继续保留。使用上面的命令而不是直接沿用 `.env.production` 的开发代理设置，确保构建结果与 Nginx `/prod/` 代理一致。
+
+若需要单独的 API 域名，可继续安装 [`deploy/nginx.conf`](../deploy/nginx.conf)，配置它的 `server_name` 和 HTTPS。使用默认 `/prod` 时只需前端站点配置。
 
 ## 11. 手动构建、双推送与回滚
 
@@ -442,7 +483,7 @@ docker buildx build --platform linux/amd64 -f deploy/Dockerfile \
 docker buildx imagetools inspect "$ACR_IMAGE:$TAG"
 ```
 
-从 inspect 输出或 Actions Summary 取得镜像摘要。手动发布同样使用独立版本目录：
+从 inspect 输出或 Actions Summary 取得镜像摘要，先按第 10 节构建 `/tmp/frontend-dist.tar.gz`。手动发布同样使用独立版本目录：
 
 ```bash
 IMAGE_DIGEST='sha256:替换为完整64位摘要'
@@ -454,6 +495,7 @@ ssh -i ~/.ssh/mineadmin_actions -p "$SSH_PORT" \
 scp -i ~/.ssh/mineadmin_actions -P "$SSH_PORT" \
   -o UserKnownHostsFile="$HOME/.ssh/mineadmin_known_hosts" \
   -o StrictHostKeyChecking=yes deploy/compose.yml deploy/deploy.sh \
+  /tmp/frontend-dist.tar.gz \
   deploy@"$SERVER_IP":/opt/mineadmin/releases/"$RELEASE_ID"/
 ssh -i ~/.ssh/mineadmin_actions -p "$SSH_PORT" \
   -o UserKnownHostsFile="$HOME/.ssh/mineadmin_known_hosts" \
@@ -467,7 +509,7 @@ ssh -i ~/.ssh/mineadmin_actions -p "$SSH_PORT" \
 bash /opt/mineadmin/current/deploy.sh --rollback
 ```
 
-回滚成功后交换 `current` / `previous`，可再次切换。首次上线没有 previous；首轮失败会停止失败的应用并保留容器供诊断。更新采取单实例替换，过程中可能短暂中断服务，不承诺零停机。
+回滚成功后交换 `current` / `previous`，前端 dist 与后端镜像一起恢复，可再次切换。首次上线没有 previous；首轮失败会停止失败的应用并保留容器供诊断。旧的仅后端 release 若没有 `frontend/index.html`，需先补齐对应版本的 dist 才能通过新脚本回滚。更新采取单实例替换，过程中可能短暂中断服务，不承诺零停机。
 
 ACR 不可用时可在服务器登录 GHCR，按相同方式发布 `ghcr.io/lhh-gh/mineadmin-backend@sha256:...` 到新的版本目录；先核实目标镜像摘要。部署脚本支持两个 Registry 的摘要引用。
 
@@ -491,6 +533,8 @@ mineadmin_compose exec app php deploy/healthcheck.php
 | healthcheck failed: mysql / redis | 阿里云服务地址、端口、凭据、实例状态、访问白名单和服务器到服务的网络；Redis 用 `REDIS_AUTH` |
 | 健康但业务表不存在 | 在正确数据库执行首次迁移；空库才 seed |
 | Nginx 502 | 应用健康状态、9501 环回监听、Nginx 上游端口与 `HTTP_PORT` |
+| 前端首页 404 或 403 | `current/frontend/index.html` 是否存在，release 和 frontend 目录能否由 Nginx 用户读取/遍历 |
+| 前端 API 404 | 构建的 baseURL 是否为 `/prod`，Nginx `proxy_pass` 是否带尾部 `/` 以去掉代理前缀 |
 | 上传文件 404 | `APP_URL`、上传共享卷、Nginx alias、父目录的读取/遍历权限 |
 | 容器被 OOM 终止 | 应用服务器内存、Compose 限制、worker 数和应用进程内存 |
 
@@ -545,6 +589,8 @@ sudo tar -czf "/var/backups/mineadmin/uploads-$(date +%Y%m%d%H%M%S).tar.gz" \
 
 - [Docker Engine：Ubuntu 安装](https://docs.docker.com/engine/install/ubuntu/)
 - [GitHub Actions：发布 Docker 镜像](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images)
+- [Vite：静态网站部署](https://vite.dev/guide/static-deploy.html)
+- [Nginx：proxy_pass 的 URI 替换规则](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_pass)
 - [阿里云 ACR：Docker 基本操作](https://help.aliyun.com/document_detail/60743.html)
 - [阿里云 ACR：企业版推送和拉取镜像](https://help.aliyun.com/zh/acr/getting-started/use-a-container-registry-enterprise-edition-instance-to-push-and-pull-images)
 - [阿里云轻量服务器：管理防火墙](https://help.aliyun.com/zh/simple-application-server/user-guide/manage-the-firewall-of-a-server)
