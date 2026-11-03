@@ -92,7 +92,7 @@ const emit = defineEmits<{
   (e: 'confirm', value: any[]): void
 }>()
 const i18n = useTrans() as TransType
-const t = i18n.globalTrans
+const t = i18n.localTrans
 
 const msg = useMessage()
 const resourceStore = useResourceStore()
