@@ -92,6 +92,27 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 - 配置从环境变量和现有配置层读取；提交内容不得包含本地凭据、令牌或上传数据。
 - 不手工修改 `vendor/`、`node_modules/`、`runtime/`、构建产物或生成的 Swagger 文件。
 
+## Git 提交规范
+
+- 提交使用 `acc:acc-commit` 技能的 Conventional Commits 格式：`type(scope): 简洁说明`；`scope` 可省略。本节覆盖 `CONTRIBUTING.md` 中旧的 `文件名: 说明` 格式约定。
+- `type` 使用英文：`feat`（功能）、`fix`（修复）、`docs`（文档）、`refactor`（重构）、`perf`（性能）、`test`（测试）、`build`（构建与依赖）、`ci`（流水线）、`chore`（维护）、`revert`（回退）。
+- `scope` 使用清晰的模块名，如 `agents`、`server`、`deploy`；默认用中文描述具体改动，避免只写“更新”“修复”等无法说明内容的标题。
+- 不兼容变更使用 `type(scope)!: 简洁说明` 或 `BREAKING CHANGE:` 页脚，并说明影响和迁移方式。
+- 一个提交围绕一个明确目的；彼此独立的功能、修复、部署配置和文档改动分别提交。
+- 暂存前检查 `git status --short`、对应路径的 `git diff`、`git diff --cached` 和近期提交 `git log -5 --oneline`；使用 `git add -- <路径>`，同一文件存在无关改动时使用 `git add -p -- <路径>` 选择本次修改。
+- 保留已有无关改动和暂存状态；提交前确认提交范围，不把无关暂存内容并入本次提交。
+- 提交前复核 `git diff --cached`，执行 `git diff --cached --check`，并完成与改动类型相符的验证。必要时在提交正文补充修改原因、影响和验证结果；失败或未执行的检查须如实说明。
+- 仓库位于 WSL 时使用 WSL Git 执行提交，避免 Windows Git 产生执行权限差异。
+- 用户要求提交时执行 `git commit`；推送、打标签和发布按用户授权的范围执行，强制推送或改写历史须有用户明确要求。
+
+提交标题示例：
+
+```text
+docs(agents): 统一 ACC Git 提交规范
+feat(server): 支持通过环境变量配置 HTTP 监听地址
+ci(deploy): 同时发布 ACR 和 GHCR 镜像
+```
+
 ## 验证与交付
 
 - 修改 PHP 后先对改动文件执行 `php -l`，再运行适用的格式检查、`composer analyse` 和相关测试。
@@ -99,4 +120,4 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 - 定向执行测试前，确保隔离环境已完成 `migrations` 组初始化。例如检查用户数据访问：`vendor/bin/co-phpunit --prepend tests/bootstrap.php --exclude-group=migrations --filter UserRepositoryTest`。
 - 修改前端后执行类型检查及相关 lint；涉及构建或页面行为时执行 `pnpm build` 或对应 E2E。E2E 的开发端口配置应与 Playwright 的 2888 保持一致。
 - 纯文档修改核对内容、路径和差异即可；检查无法运行时明确说明原因，不把未执行的检查描述为通过。
-- 交付前复核本次改动和暂存状态。需要提交时遵循 `CONTRIBUTING.md` 的 `[File Name]: Info about commit` 格式，并说明相关验证结果。
+- 交付前复核本次改动和暂存状态。需要提交时遵循本文件的 Git 提交规范，并说明相关验证结果。
