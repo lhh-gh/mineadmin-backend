@@ -9,7 +9,7 @@
  */
 import boxen from 'boxen'
 import picocolors from 'picocolors'
-import pkg from '../package.json'
+import pkg from '../package.json' with { type: 'json' }
 
 export default function startInfo(): any {
   return {

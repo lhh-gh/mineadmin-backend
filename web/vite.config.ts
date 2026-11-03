@@ -2,9 +2,9 @@ import path from 'node:path'
 import process from 'node:process'
 import dayjs from 'dayjs'
 import { defineConfig, loadEnv } from 'vite'
-import pkg from './package.json'
-import createVitePlugins from './vite'
-import { exclude, include } from './vite/optimize'
+import pkg from './package.json' with { type: 'json' }
+import createVitePlugins from './vite/index.ts'
+import { exclude, include } from './vite/optimize.ts'
 
 // https://cn.vite.dev/config/
 export default async ({ mode, command }) => {
@@ -36,17 +36,20 @@ export default async ({ mode, command }) => {
         },
       },
     },
-    esbuild: {
-      drop: isProduction() ? ['console', 'debugger'] : [],
-    },
     // 构建选项 https://cn.vite.dev/config/#server-fsserve-root
     build: {
       outDir: isProduction ? 'dist' : `dist-${mode}`,
       sourcemap: env.VITE_BUILD_SOURCEMAP === 'true',
-      minify: 'esbuild',
+      minify: 'oxc',
       cssMinify: 'esbuild',
       rolldownOptions: {
         output: {
+          minify: {
+            compress: {
+              dropConsole: isProduction(),
+              dropDebugger: isProduction(),
+            },
+          },
           codeSplitting: true,
           chunkFileNames: 'static/js/[name]-[hash].js',
           entryFileNames: 'static/js/[name]-[hash].js',
@@ -70,10 +73,10 @@ export default async ({ mode, command }) => {
     plugins: createVitePlugins(env, command === 'build'),
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, 'src'),
-        '#': path.resolve(__dirname, 'types'),
-        '$': path.resolve(__dirname, 'src/plugins'),
-        '~': path.resolve(__dirname, 'src/modules'),
+        '@': path.resolve(import.meta.dirname, 'src'),
+        '#': path.resolve(import.meta.dirname, 'types'),
+        '$': path.resolve(import.meta.dirname, 'src/plugins'),
+        '~': path.resolve(import.meta.dirname, 'src/modules'),
       },
     },
     css: {
